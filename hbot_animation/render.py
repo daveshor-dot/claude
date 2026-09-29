@@ -2,9 +2,12 @@
 """Render a 30 s, 3840x2160 MP4 of the HyperVan control panel running an
 HBOT pressurization sequence: main lock first, then the entry lock.
 
-The panel photo (panel.jpg) is used as the plate; gauge needles are removed
-by inpainting and redrawn per frame, knobs/valves are rotated in place, lamps
-and 7-segment counters are relit.
+The panel photo (panel.jpg) is a static, full-frame background. Only the
+analogue controls move: gauge needles (removed by inpainting and redrawn per
+frame), rotary knobs and quarter-turn valves (rotated in place) and indicator
+lamps. No overlays, captions or digital readouts are drawn. The last frame
+matches the first (everything off, all gauges at zero) so the clip loops
+seamlessly.
 
 Profile (time-compressed) follows the US Navy Treatment Table 6 shape:
 compress to 60 fsw (with an ear-clearing hold at 10 fsw), hold at depth,
@@ -20,7 +23,7 @@ from multiprocessing import Pool
 import cv2
 import imageio_ffmpeg
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "panel.jpg")
@@ -29,12 +32,9 @@ OUT = os.path.join(HERE, "hypervan_hbot_sequence_4k.mp4")
 W, H = 3840, 2160
 FPS = 30
 DUR = 30.0
-S = 1.5                      # source -> plate scale
-OX, OY = 420, 22             # plate offset in the frame
-BG = (22, 22, 22)
-FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-FONT_B = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-FONT_M = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+S = H / 1294                 # source -> plate scale (panel fills the height)
+OX, OY = (W - round(2000 * S)) // 2, 0
+BG = (21, 21, 21)            # matches the panel photo's background
 
 # ---- element positions in source-image pixels -----------------------------
 LIGHTS = {"supply": (203, 232, 38), "main": (203, 634, 38), "entry": (203, 1054, 38)}
@@ -44,8 +44,6 @@ KNOBS = {"main_rate": (635, 627, 61), "main_set": (857, 627, 61),
 BIG_GAUGES = {"main_cur": (1150, 614), "main_set": (1489, 614),
               "entry_cur": (1150, 1034), "entry_set": (1489, 1034)}
 SMALL_GAUGES = {"source": (1156, 227), "mid": (1490, 227)}
-COUNTERS = {"main": (889, 200, 970, 245), "entry": (889, 275, 970, 320)}
-SECTIONS = {"main": (90, 443, 1910, 824), "entry": (90, 863, 1910, 1245)}
 
 
 def sp(v):
@@ -89,25 +87,7 @@ entry_rate = keys([(0, 0), (18.6, 0), (19.2, 0.8), (25.0, 0.8), (25.3, 0.5),
 entry_valve = keys([(0, 0), (18.2, 0), (18.8, 1), (27.9, 1), (28.4, 0)])
 
 ac_valve = keys([(0, 0), (1.0, 0), (1.6, 1), (28.8, 1), (29.3, 0)])
-supply_p = keys([(0, 0), (1.4, 0), (3.0, 150), (28.9, 150), (29.8, 138)])
-
-PHASES = [
-    (0.0, "SYSTEM START-UP", "Supply on  ·  AC master valve open  ·  source pressure up"),
-    (2.6, "MAIN LOCK  ·  SET-UP", "Lock active  ·  master valve open  ·  rate set  ·  pressure set 60 fsw"),
-    (4.4, "MAIN LOCK  ·  INITIAL COMPRESSION", "Slow descent to 10 fsw  ·  ear-clearing hold"),
-    (6.0, "MAIN LOCK  ·  COMPRESSION", "Descent to treatment depth, 60 fsw"),
-    (8.8, "MAIN LOCK  ·  TREATMENT DEPTH", "Hold at 60 fsw (2.82 ATA)  ·  oxygen breathing periods"),
-    (11.5, "MAIN LOCK  ·  DECOMPRESSION", "Rate reduced  ·  set 30 fsw  ·  controlled ascent"),
-    (13.8, "MAIN LOCK  ·  STOP", "Hold at 30 fsw (1.91 ATA)  ·  oxygen breathing periods"),
-    (15.3, "MAIN LOCK  ·  DECOMPRESSION", "Set 0 fsw  ·  ascent to surface"),
-    (17.0, "MAIN LOCK  ·  CYCLE COMPLETE", "At surface  ·  master valve closed  ·  lock inactive"),
-    (18.0, "ENTRY LOCK  ·  SET-UP", "Lock active  ·  master valve open  ·  rate set  ·  pressure set 60 fsw"),
-    (19.8, "ENTRY LOCK  ·  PRESSURIZATION", "Descent to 10 fsw  ·  ear-clearing hold  ·  on to 60 fsw"),
-    (23.2, "ENTRY LOCK  ·  HOLD", "Holding 60 fsw (2.82 ATA)  ·  pressure equalized"),
-    (25.0, "ENTRY LOCK  ·  VENT", "Set 0 fsw  ·  vent to surface"),
-    (27.8, "SEQUENCE COMPLETE", "Both locks at surface  ·  valves closed  ·  supply secured"),
-]
-
+supply_p = keys([(0, 0), (1.4, 0), (3.0, 150), (28.9, 150), (29.7, 0)])
 
 def flow(t):
     """Normalised gas draw from supply (compression only)."""
@@ -121,8 +101,7 @@ def state(t):
     wob = lambda a, f: a * math.sin(t * f) * math.sin(t * f * 0.37 + 1.3)
     sup = supply_p(t)
     return {
-        "fade": smooth(t / 0.6) * (1 - smooth((t - 29.4) / 0.6)),
-        "supply_light": step_on(t, 0.8, ramp=0.08) * (0.55 + 0.45 * (1 if t > 1.05 or (t * 30) % 3 > 1 else 0.3)),
+        "supply_light": step_on(t, 0.8, 29.4, ramp=0.08) * (0.55 + 0.45 * (1 if t > 1.05 or (t * 30) % 3 > 1 else 0.3)),
         "main_light": step_on(t, 2.6, 17.7),
         "entry_light": step_on(t, 18.0, 28.5),
         "ac": ac_valve(t), "main_valve": main_valve(t), "entry_valve": entry_valve(t),
@@ -134,10 +113,6 @@ def state(t):
         "entry_set": entry_set(t - 0.25),
         "source": max(sup - 10 * fl + (wob(1.2, 23) if fl > 0 else 0), 0),
         "mid": max(sup * 0.8 - 30 * fl + (wob(1.5, 29) if fl > 0 else 0), 0),
-        "main_count": 1 if t >= 2.6 else 0,
-        "entry_count": 1 if t >= 18.0 else 0,
-        "counters_on": step_on(t, 0.9, ramp=0.1),
-        "main_psi": main_p(t), "entry_psi": entry_p(t),
     }
 
 
@@ -209,12 +184,6 @@ def build_plate():
         gauges[name] = (hx, hy)
     plate = Image.fromarray(arr)
 
-    # blank the counter windows
-    d = ImageDraw.Draw(plate)
-    for x0, y0, x1, y1 in COUNTERS.values():
-        col = tuple(int(c) for c in np.median(arr[int(sp(y0 + 3)):int(sp(y0 + 7)), int(sp(x0 + 3)):int(sp(x1 - 3))].reshape(-1, 3), axis=0))
-        d.rectangle((sp(x0 + 1), sp(y0 + 1), sp(x1 - 1), sp(y1 - 1)), fill=col)
-
     # rotating parts and lamp states
     discs = {}
     for name, (cx, cy, r) in {**VALVES, **{k: v for k, v in KNOBS.items()}}.items():
@@ -242,16 +211,7 @@ def build_plate():
         lamps[name] = (off_img, on_img, pos, g, (int(sp(cx) - gs / 2), int(sp(cy) - gs / 2)))
         plate.paste(off_img, pos, off_img)
 
-    # section highlight sprites
-    glows = {}
-    for name, (x0, y0, x1, y1) in SECTIONS.items():
-        pad = int(sp(30))
-        w, h = int(sp(x1 - x0)) + 2 * pad, int(sp(y1 - y0)) + 2 * pad
-        g = Image.new("L", (w, h), 0)
-        ImageDraw.Draw(g).rounded_rectangle((pad, pad, w - pad, h - pad), radius=int(sp(34)), outline=255, width=int(sp(4)))
-        g = g.filter(ImageFilter.GaussianBlur(sp(9)))
-        glows[name] = (g, (int(sp(x0)) - pad, int(sp(y0)) - pad))
-    return plate, gauges, discs, lamps, glows
+    return plate, gauges, discs, lamps
 
 
 # ---- drawing helpers ---------------------------------------------------------
@@ -320,48 +280,6 @@ def draw_small_needle(frame, cx, cy, val):
     frame.alpha_composite(out, (int(round(cx - size / 2)), int(round(cy - size / 2))))
 
 
-SEG = {  # a b c d e f g
-    0: "abcdef", 1: "bc", 2: "abged", 3: "abgcd", 4: "fgbc", 5: "afgcd",
-    6: "afgedc", 7: "abc", 8: "abcdefg", 9: "abcdfg"}
-
-
-def seg_polys(x, y, w, h, t):
-    """Segment polygons for one digit cell (origin top-left, unslanted)."""
-    hm = h / 2
-    def hseg(yc):
-        return [(x + t * 0.6, yc), (x + t * 1.1, yc - t / 2), (x + w - t * 1.1, yc - t / 2),
-                (x + w - t * 0.6, yc), (x + w - t * 1.1, yc + t / 2), (x + t * 1.1, yc + t / 2)]
-    def vseg(xc, y0, y1):
-        return [(xc, y0 + t * 0.6), (xc + t / 2, y0 + t * 1.1), (xc + t / 2, y1 - t * 1.1),
-                (xc, y1 - t * 0.6), (xc - t / 2, y1 - t * 1.1), (xc - t / 2, y0 + t * 1.1)]
-    return {"a": hseg(y + t / 2), "g": hseg(y + hm), "d": hseg(y + h - t / 2),
-            "f": vseg(x + t / 2, y, y + hm), "b": vseg(x + w - t / 2, y, y + hm),
-            "e": vseg(x + t / 2, y + hm, y + h), "c": vseg(x + w - t / 2, y + hm, y + h)}
-
-
-def draw_counter(frame, box, value, on):
-    x0, y0, x1, y1 = [sp(v) for v in box]
-    bw, bh = int(x1 - x0), int(y1 - y0)
-    img = Image.new("RGBA", (bw * SS, bh * SS), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    dw, dh, gap = sp(19) * SS, sp(27) * SS, sp(3.5) * SS
-    t = sp(4.2) * SS
-    slant = 0.14
-    digits = f"{value:03d}"
-    total = 3 * dw + 2 * gap
-    sx = bw * SS - sp(5) * SS - total - dh * slant
-    sy = (bh * SS - dh) / 2
-    lit = (int(60 + 190 * on), int(60 + 190 * on), int(60 + 185 * on), 255)
-    for i, ch in enumerate(digits):
-        polys = seg_polys(sx + i * (dw + gap), sy, dw, dh, t)
-        for sname, poly in polys.items():
-            poly = [(px + (sy + dh - py) * slant, py) for px, py in poly]
-            on_seg = sname in SEG[int(ch)]
-            d.polygon(poly, fill=lit if on_seg else (62, 62, 62, 255))
-    out = img.resize((bw, bh), Image.LANCZOS)
-    frame.alpha_composite(out, (int(OX + x0), int(OY + y0)))
-
-
 def rotated(disc, deg):
     patch, pos = disc
     return patch.rotate(-deg, resample=Image.BICUBIC), pos
@@ -372,35 +290,14 @@ _G = {}
 
 
 def init_worker():
-    _G["plate"], _G["gauges"], _G["discs"], _G["lamps"], _G["glows"] = build_plate()
-    _G["f_title"] = ImageFont.truetype(FONT_B, 54)
-    _G["f_sub"] = ImageFont.truetype(FONT, 40)
-    _G["f_read"] = ImageFont.truetype(FONT_M, 40)
-    _G["f_small"] = ImageFont.truetype(FONT, 28)
-
-
-def spaced(d, xy, text, font, fill, spacing):
-    x, y = xy
-    for ch in text:
-        d.text((x, y), ch, font=font, fill=fill)
-        x += d.textlength(ch, font=font) + spacing
-    return x
+    _G["plate"], _G["gauges"], _G["discs"], _G["lamps"] = build_plate()
 
 
 def render(i):
     t = i / FPS
     st = state(t)
-    plate, gauges, discs, lamps, glows = _G["plate"], _G["gauges"], _G["discs"], _G["lamps"], _G["glows"]
+    plate, gauges, discs, lamps = _G["plate"], _G["gauges"], _G["discs"], _G["lamps"]
     layer = plate.copy().convert("RGBA")
-
-    # section glow for the active lock
-    for name in ("main", "entry"):
-        a = st[f"{name}_light"]
-        if a > 0.01:
-            g, pos = glows[name]
-            col = Image.new("RGBA", g.size, (255, 60, 45, 0))
-            col.putalpha(g.point(lambda v, a=a: int(v * 0.55 * a)))
-            layer.alpha_composite(col, pos)
 
     # lamps
     for name, key in (("supply", "supply_light"), ("main", "main_light"), ("entry", "entry_light")):
@@ -433,36 +330,7 @@ def render(i):
 
     frame = Image.new("RGBA", (W, H), BG + (255,))
     frame.alpha_composite(layer, (OX, OY))
-    draw_counter(frame, COUNTERS["main"], st["main_count"], st["counters_on"])
-    draw_counter(frame, COUNTERS["entry"], st["entry_count"], st["counters_on"])
-
-    # caption strip
-    d = ImageDraw.Draw(frame)
-    phase = [p for p in PHASES if p[0] <= t][-1]
-    y = OY + plate.height + 22
-    mx0, mx1 = OX + int(sp(90)), OX + int(sp(1910))
-    spaced(d, (mx0, y), phase[1], _G["f_title"], (240, 240, 240), 3)
-    d.text((mx0, y + 72), phase[2], font=_G["f_sub"], fill=(170, 170, 170))
-    for k, (label, key) in enumerate((("MAIN", "main_psi"), ("ENTRY", "entry_psi"))):
-        v = max(st[key], 0)
-        s = f"{label:<5} {v:5.1f} fsw  {1 + v / 33:4.2f} ATA"
-        tw = d.textlength(s, font=_G["f_read"])
-        active = st[f"{label.lower()}_light"] > 0.5
-        d.text((mx1 - tw, y + 4 + k * 54), s, font=_G["f_read"],
-               fill=(255, 110, 95) if active else (150, 150, 150))
-    # progress bar with the two lock segments
-    by = H - 24
-    d.rectangle((mx0, by, mx1, by + 6), fill=(55, 55, 55))
-    for a, b in ((2.6, 17.7), (18.0, 28.5)):
-        d.rectangle((mx0 + (mx1 - mx0) * a / DUR, by, mx0 + (mx1 - mx0) * b / DUR, by + 6), fill=(110, 40, 35))
-    d.rectangle((mx0, by, mx0 + (mx1 - mx0) * t / DUR, by + 6), fill=(235, 70, 55))
-    note = "Simulation · time-compressed · profile after USN Treatment Table 6"
-    d.text((mx1 - d.textlength(note, font=_G["f_small"]), y + 120), note, font=_G["f_small"], fill=(110, 110, 110))
-
-    rgb = frame.convert("RGB")
-    if st["fade"] < 0.999:
-        rgb = Image.blend(Image.new("RGB", (W, H), (0, 0, 0)), rgb, st["fade"])
-    return rgb.tobytes()
+    return frame.convert("RGB").tobytes()
 
 
 def main():
