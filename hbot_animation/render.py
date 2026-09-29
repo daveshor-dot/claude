@@ -23,7 +23,7 @@ from multiprocessing import Pool
 import cv2
 import imageio_ffmpeg
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "panel.jpg")
@@ -105,8 +105,8 @@ def state(t):
         "main_light": step_on(t, 2.6, 17.7),
         "entry_light": step_on(t, 18.0, 28.5),
         "ac": ac_valve(t), "main_valve": main_valve(t), "entry_valve": entry_valve(t),
-        "main_rate": main_rate(t), "main_setk": main_set(t) / 165.0,
-        "entry_rate": entry_rate(t), "entry_setk": entry_set(t) / 165.0,
+        "main_rate": main_rate(t), "main_setk": main_set(t) / FSW_MAX,
+        "entry_rate": entry_rate(t), "entry_setk": entry_set(t) / FSW_MAX,
         "main_cur": main_p(t) + (wob(0.35, 5.0) if 8.8 < t < 11.9 else 0),
         "main_set": main_set(t - 0.25),
         "entry_cur": entry_p(t) + (wob(0.35, 5.0) if 23.2 < t < 25.4 else 0),
@@ -165,10 +165,124 @@ def disc_patch(img, cx, cy, r):
     return crop, (x0, y0)
 
 
+# ---- big red gauges: dial re-printed for a 0-150 fsw range ------------------
+FSW_MAX = 150.0              # full-scale reading of the red gauges
+M_PER_FT = 0.3048
+SANS = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+# radii in source px from the hub, measured on the photo
+R_FACE, R_RING_IN, R_RING_OUT = 85.4, 90.6, 103.4
+
+
+def fsw_angle(v):
+    return -135 + 270 * v / FSW_MAX
+
+
+def _text_sprite(text, cap_h, width=None, color=(22, 22, 22)):
+    """Black text on transparent, cap height cap_h px, optionally stretched to width."""
+    font = ImageFont.truetype(SANS, max(int(cap_h / 0.716), 4))
+    l, t, r, b = font.getbbox(text)
+    img = Image.new("RGBA", (r - l + 4, b - t + 4), color + (0,))
+    ImageDraw.Draw(img).text((2 - l, 2 - t), text, font=font, fill=color + (255,))
+    if width:
+        img = img.resize((max(int(width), 1), img.height), Image.LANCZOS)
+    return img
+
+
+def _paste_center(dst, sprite, x, y, rot=0.0):
+    if rot:
+        sprite = sprite.rotate(-rot, resample=Image.BICUBIC, expand=True)
+    dst.alpha_composite(sprite, (int(round(x - sprite.width / 2)), int(round(y - sprite.height / 2))))
+
+
+def redraw_face(arr, orig, hx, hy):
+    """Re-print the dial of one red gauge (inner fsw scale, outer msw ring)."""
+    k = S * SS                                   # source px -> hi-res px
+    half = int(math.ceil(sp(R_RING_OUT + 2)))
+    x0, y0 = int(round(hx)) - half, int(round(hy)) - half
+    size = 2 * half
+    crop = arr[y0:y0 + size, x0:x0 + size]
+    # paper and its lighting, with all printing removed
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(sp(9)) | 1, int(sp(9)) | 1))
+    lit = cv2.dilate(crop, ker).astype(np.float32)
+    # radially symmetric paper tone (median per radius) so no trace of the old
+    # needle survives
+    yy, xx = np.mgrid[0:size, 0:size]
+    rr = np.hypot(xx - (hx - x0), yy - (hy - y0))
+    rb = rr.astype(int)
+    paper = np.zeros_like(lit)
+    for ri in range(int(sp(R_RING_OUT)) + 2):
+        sel = rb == ri
+        if sel.any():
+            paper[sel] = np.median(lit[sel], axis=0)
+    paper = cv2.GaussianBlur(paper, (0, 0), 1.5).clip(0, 255).astype(np.uint8)
+    hi = Image.fromarray(paper).resize((size * SS, size * SS), Image.BICUBIC).convert("RGBA")
+    d = ImageDraw.Draw(hi)
+    c = ((hx - x0) * SS, (hy - y0) * SS)
+    ink = (22, 22, 22, 255)
+
+    def tick(deg, r1, r2, w):
+        a = math.radians(deg)
+        ux, uy = math.sin(a), -math.cos(a)
+        px, py = -uy * w * k / 2, ux * w * k / 2
+        p1 = (c[0] + ux * r1 * k, c[1] + uy * r1 * k)
+        p2 = (c[0] + ux * r2 * k, c[1] + uy * r2 * k)
+        d.polygon([(p1[0] + px, p1[1] + py), (p2[0] + px, p2[1] + py),
+                   (p2[0] - px, p2[1] - py), (p1[0] - px, p1[1] - py)], fill=ink)
+
+    def polar(deg, r):
+        a = math.radians(deg)
+        return c[0] + math.sin(a) * r * k, c[1] - math.cos(a) * r * k
+
+    # inner scale: 1 ft divisions, 5 ft mid ticks, numbered every 25 ft
+    for v in range(0, int(FSW_MAX) + 1):
+        if v % 25 == 0:
+            tick(fsw_angle(v), 70.5, 85.0, 1.15)
+        elif v % 5 == 0:
+            tick(fsw_angle(v), 79.0, 85.0, 0.7)
+        else:
+            tick(fsw_angle(v), 81.5, 85.0, 0.45)
+    for v in range(0, int(FSW_MAX) + 1, 25):
+        _paste_center(hi, _text_sprite(str(v), 8.0 * k), *polar(fsw_angle(v), 62.5))
+
+    # outer ring: metres of sea water, 0.5 m divisions, numbered every 5 m
+    m_max = FSW_MAX * M_PER_FT
+    for i in range(0, int(m_max * 2) + 1):
+        m = i / 2
+        deg = fsw_angle(m / M_PER_FT)
+        if i % 10 == 0:
+            tick(deg, 90.6, 95.5, 0.55)
+            lab = _text_sprite(str(int(m)), 2.6 * k)
+            _paste_center(hi, lab, *polar(deg, 98.6), rot=deg)
+        elif i % 2 == 0:
+            tick(deg, 90.6, 94.0, 0.4)
+        else:
+            tick(deg, 90.6, 92.6, 0.35)
+
+    # dial printing
+    _paste_center(hi, _text_sprite("PNEUMO", 4.7 * k, 44 * k), *polar(0, 26.5))
+    _paste_center(hi, _text_sprite("1/4 OF 1% ACCURACY", 1.9 * k, 30 * k), c[0], c[1] - 20.8 * k)
+    _paste_center(hi, _text_sprite("1 FOOT OF SEA WATER DIVISIONS", 1.9 * k, 60 * k), c[0], c[1] + 22.4 * k)
+    _paste_center(hi, _text_sprite("0.5 METERS OF SEA WATER DIVISIONS", 1.9 * k, 66 * k), c[0], c[1] + 27.6 * k)
+
+    face = np.array(hi.resize((size, size), Image.LANCZOS).convert("RGB")).astype(np.float32)
+    # "PERMA-CAL INDUSTRIES" is kept from the photo
+    bx0, bx1 = int(hx - x0 - sp(25)), int(hx - x0 + sp(27))
+    by0, by1 = int(hy - y0 + sp(54.5)), int(hy - y0 + sp(69))
+    ink_orig = orig[y0 + by0:y0 + by1, x0 + bx0:x0 + bx1].astype(np.float32)
+    paper_orig = cv2.dilate(orig[y0:y0 + size, x0:x0 + size], ker)[by0:by1, bx0:bx1]
+    face[by0:by1, bx0:bx1] += np.minimum(ink_orig - paper_orig, 0)
+
+    r = rr / S
+    a = np.clip(R_FACE - r + 0.5, 0, 1) + np.clip(r - R_RING_IN + 0.5, 0, 1) * np.clip(R_RING_OUT - r + 0.5, 0, 1)
+    a = a[..., None]
+    arr[y0:y0 + size, x0:x0 + size] = (face * a + crop * (1 - a)).astype(np.uint8)
+
+
 def build_plate():
     src = Image.open(SRC).convert("RGB")
     plate = src.resize((int(src.width * S), int(src.height * S)), Image.LANCZOS)
     arr = np.array(plate)
+    orig = arr.copy()
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
     gauges = {}
     for name, (cx, cy) in {**BIG_GAUGES, **SMALL_GAUGES}.items():
@@ -182,6 +296,8 @@ def build_plate():
         arr = cv2.inpaint(arr, m, 3, cv2.INPAINT_NS)
         gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
         gauges[name] = (hx, hy)
+    for name in BIG_GAUGES:
+        redraw_face(arr, orig, *gauges[name])
     plate = Image.fromarray(arr)
 
     # rotating parts and lamp states
@@ -219,7 +335,7 @@ SS = 3  # supersampling for vector bits
 
 
 def draw_big_needle(frame, cx, cy, val):
-    ang = math.radians(-135 + 0.6 * min(max(val, -3), 460))
+    ang = math.radians(fsw_angle(min(max(val, -1), FSW_MAX + 3)))
     L, T = sp(60), sp(26)
     size = int(2 * max(L, T) + sp(16))
     img = Image.new("RGBA", (size * SS, size * SS), (0, 0, 0, 0))
