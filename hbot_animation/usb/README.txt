@@ -2,10 +2,10 @@ HYPERVAN CONTROL PANEL LOOP - TV USB SETUP
 ==========================================
 
 WHAT IS HERE
-  HYPERVAN_4K.mp4   For 4K (Ultra HD) TVs. 20 minutes of the 30-second
+  HYPERVAN_4K.mp4   For 4K (Ultra HD) TVs. 4 minutes of the 30-second
                     sequence, repeated seamlessly.
   HYPERVAN_HD.mp4   For 1080p / HD TVs, or any TV that won't play the 4K
-                    file. 60 minutes, repeated seamlessly.
+                    file. 14 minutes, repeated seamlessly.
 
 Put ONLY ONE of the two videos on the USB drive. With both on it, the TV
 may try to play the one it can't handle.
@@ -36,7 +36,7 @@ may try to play the one it can't handle.
      TCL/Roku  Roku Media Player > * button > Repeat
      Hisense   Options (or ...) > Repeat mode > Single
    Many TVs remember this setting. If yours has no repeat option, the
-   video still runs for 20 minutes (4K) or 60 minutes (HD) before it
+   video still runs for 4 minutes (4K) or 14 minutes (HD) before it
    ends.
 
    NOTE: A TV can't run a program from a USB drive. It can only play

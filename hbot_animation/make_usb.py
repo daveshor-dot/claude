@@ -11,8 +11,8 @@ player. So the "program" is a file layout every TV media player understands:
   - short 8.3 style upper-case file names in the drive root.
 
 Outputs (in ./usb/):
-  HYPERVAN_4K.mp4     3840x2160, level 5.1, 20 minutes
-  HYPERVAN_HD.mp4     1920x1080, level 4.1, 60 minutes
+  HYPERVAN_4K.mp4     3840x2160, level 5.1, 4 minutes
+  HYPERVAN_HD.mp4     1920x1080, level 4.1, 14 minutes
 """
 import os
 import subprocess
@@ -47,8 +47,8 @@ def main():
         run("-i", CLIP, "-vf", "scale=1920:1080:flags=lanczos", "-c:v", "libx264",
             "-preset", "slow", "-crf", "18", "-profile:v", "high", "-level", "4.1",
             "-pix_fmt", "yuv420p", "-g", "300", hd)
-        loop(CLIP, 40, os.path.join(OUT, "HYPERVAN_4K.mp4"), tmp)
-        loop(hd, 120, os.path.join(OUT, "HYPERVAN_HD.mp4"), tmp)
+        loop(CLIP, 8, os.path.join(OUT, "HYPERVAN_4K.mp4"), tmp)
+        loop(hd, 28, os.path.join(OUT, "HYPERVAN_HD.mp4"), tmp)
     for name in sorted(os.listdir(OUT)):
         print(name, os.path.getsize(os.path.join(OUT, name)))
 
